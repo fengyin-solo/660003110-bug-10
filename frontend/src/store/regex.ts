@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import type { NFA, MatchResult, MatchStep, RegexTemplate, ASTNode } from '../types'
 
 const GROUP_COLORS = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#3b82f6', '#8b5cf6', '#ec4899', '#14b8a6']
@@ -404,6 +404,15 @@ export const useRegexStore = defineStore('regex', () => {
 
   const groupColors = GROUP_COLORS
 
+  // 模板选中状态始终跟随当前正则：手动修改正则后清除选中，
+  // 回退到某个模板的正则时恢复选中，避免卡片高亮与实际输入对不上
+  watch(pattern, (p) => {
+    const current = TEMPLATES.find(t => t.name === selectedTemplate.value)
+    if (current && current.pattern === p) return
+    const matched = TEMPLATES.find(t => t.pattern === p)
+    selectedTemplate.value = matched ? matched.name : ''
+  }, { flush: 'sync' })
+
   const matchHighlight = computed(() => {
     if (!matchResult.value || !matchResult.value.matched) return null
     const matchText = matchResult.value.matchText
@@ -443,6 +452,16 @@ export const useRegexStore = defineStore('regex', () => {
   }
 
   function applyTemplate(t: RegexTemplate) {
+    // 重复套用同一模板时不覆盖用户已自定义的内容
+    if (selectedTemplate.value === t.name) return
+    // 先校验模板可解析，套用失败时保留当前正则与选中状态
+    try {
+      buildNFA(t.pattern)
+      parseAST(t.pattern)
+    } catch (e: any) {
+      error.value = `模板「${t.name}」套用失败：${e?.message || '解析错误'}`
+      return
+    }
     pattern.value = t.pattern
     testString.value = t.testString
     selectedTemplate.value = t.name

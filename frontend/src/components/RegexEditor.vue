@@ -4,8 +4,7 @@
     <div class="relative">
       <span class="absolute left-3 top-2 text-cyan-500 font-bold text-lg">/</span>
       <input
-        v-model="localPattern"
-        @input="onInput"
+        v-model="patternInput"
         @keyup.enter="execute"
         type="text"
         placeholder="输入正则表达式..."
@@ -15,8 +14,7 @@
     </div>
     <div v-if="store.error" class="mt-2 text-red-400 text-sm">⚠ {{ store.error }}</div>
     <textarea
-      v-model="localTestString"
-      @input="onTestInput"
+      v-model="testStringInput"
       placeholder="输入测试字符串..."
       rows="3"
       class="w-full mt-3 bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-slate-200 font-mono text-sm focus:outline-none focus:border-cyan-500 resize-none"
@@ -26,25 +24,30 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed } from 'vue'
 import { useRegexStore } from '../store/regex'
 
 const store = useRegexStore()
-const localPattern = ref(store.pattern)
-const localTestString = ref(store.testString)
 
-let debounceTimer: ReturnType<typeof setTimeout>
-function onInput() {
+// 直接读写 store，不保留本地副本，保证卡片选中、输入内容与匹配结果同步；
+// 防抖只延迟执行，不会把旧文本回写到 store，避免快速切换模板时结果乱序
+let debounceTimer: ReturnType<typeof setTimeout> | undefined
+function scheduleExecute() {
   clearTimeout(debounceTimer)
-  debounceTimer = setTimeout(() => { store.setPattern(localPattern.value) }, 300)
+  debounceTimer = setTimeout(() => store.execute(), 300)
 }
-function onTestInput() {
-  clearTimeout(debounceTimer)
-  debounceTimer = setTimeout(() => { store.setTestString(localTestString.value) }, 300)
-}
+
+const patternInput = computed({
+  get: () => store.pattern,
+  set: (v: string) => { store.pattern = v; scheduleExecute() }
+})
+const testStringInput = computed({
+  get: () => store.testString,
+  set: (v: string) => { store.testString = v; scheduleExecute() }
+})
+
 function execute() {
-  store.setPattern(localPattern.value)
-  store.setTestString(localTestString.value)
+  clearTimeout(debounceTimer)
   store.execute()
 }
 </script>
