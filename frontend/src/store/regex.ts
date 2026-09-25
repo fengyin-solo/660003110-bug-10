@@ -40,6 +40,8 @@ function buildNFA(pattern: string): { states: StateNode[]; startState: number; a
   let stateCounter = 0
   let pos = 0
   let groupCount = 0
+  // 可视化场景下限制重复展开的上限，避免病态正则拖垮渲染
+  const MAX_REPEAT = 100
 
   function newState(): number {
     const id = stateCounter++
@@ -81,74 +83,155 @@ function buildNFA(pattern: string): { states: StateNode[]; startState: number; a
     }
   }
 
+  // 解析 {n} / {n,} / {n,m} 量词，pos 进入时指向 '{'，返回后越过 '}'
+  function parseBraceQuantifier(): { min: number; max: number | null } {
+    pos++ // skip {
+    let minStr = ''
+    while (pos < pattern.length && pattern[pos] >= '0' && pattern[pos] <= '9') { minStr += pattern[pos]; pos++ }
+    const min = Math.min(minStr ? parseInt(minStr, 10) : 0, MAX_REPEAT)
+    let max: number | null = min
+    if (pattern[pos] === ',') {
+      pos++
+      let maxStr = ''
+      while (pos < pattern.length && pattern[pos] >= '0' && pattern[pos] <= '9') { maxStr += pattern[pos]; pos++ }
+      max = maxStr ? Math.min(parseInt(maxStr, 10), MAX_REPEAT) : null
+    }
+    while (pos < pattern.length && pattern[pos] !== '}') pos++
+    pos++ // skip }
+    if (max !== null && max < min) max = min
+    return { min, max }
+  }
+
+  // 解析一个原子片段（分组/字符类/转义/点/锚点/普通字符），消费量词之前的部分
+  function parseSegment(): [number, number] {
+    let segStart: number, segEnd: number
+    const ch = pattern[pos]
+    if (ch === '(') {
+      pos++
+      groupCount++
+      if (pattern[pos] === '?') {
+        pos++
+        if (pattern[pos] === ':') { pos++; }
+        const [s, e] = parseOr()
+        segStart = s; segEnd = e
+      } else {
+        const [s, e] = parseOr()
+        segStart = s; segEnd = e
+      }
+      pos++ // skip )
+    } else if (ch === '[') {
+      pos++
+      segStart = newState()
+      segEnd = newState()
+      const matcher = parseCharClass()
+      addTransition(segStart, '__class_' + segStart, segEnd)
+      // 匹配器挂在转移的源状态上，matchTransition 从源状态读取
+      ;(states[segStart] as any)._matcher = matcher
+    } else if (ch === '.') {
+      segStart = newState()
+      segEnd = newState()
+      addTransition(segStart, '__dot', segEnd)
+      pos++
+    } else if (ch === '\\') {
+      pos++
+      const escaped = pattern[pos]
+      segStart = newState()
+      segEnd = newState()
+      if (escaped === 'd') addTransition(segStart, '__digit', segEnd)
+      else if (escaped === 'w') addTransition(segStart, '__word', segEnd)
+      else if (escaped === 's') addTransition(segStart, '__space', segEnd)
+      else addTransition(segStart, escaped, segEnd)
+      pos++
+    } else if (ch === '^' || ch === '$') {
+      segStart = newState()
+      segEnd = segStart
+      pos++
+    } else {
+      segStart = newState()
+      segEnd = newState()
+      addTransition(segStart, ch, segEnd)
+      pos++
+    }
+    return [segStart, segEnd]
+  }
+
   function parseConcat(): [number, number] {
     let start = newState()
     let end = start
     while (pos < pattern.length && !['|', ')'].includes(pattern[pos])) {
-      let segStart: number, segEnd: number
-      const ch = pattern[pos]
-      if (ch === '(') {
-        pos++
-        groupCount++
-        if (pattern[pos] === '?') {
-          pos++
-          if (pattern[pos] === ':') { pos++; }
-          const [s, e] = parseOr()
-          segStart = s; segEnd = e
-        } else {
-          const [s, e] = parseOr()
-          segStart = s; segEnd = e
-        }
-        pos++ // skip )
-      } else if (ch === '[') {
-        pos++
-        segStart = newState()
-        segEnd = newState()
-        const matcher = parseCharClass()
-        addTransition(segStart, '__class_' + segStart, segEnd)
-        ;(states[segEnd] as any)._matcher = matcher
-      } else if (ch === '.') {
-        segStart = newState()
-        segEnd = newState()
-        addTransition(segStart, '__dot', segEnd)
-        pos++
-      } else if (ch === '\\') {
-        pos++
-        const escaped = pattern[pos]
-        segStart = newState()
-        segEnd = newState()
-        if (escaped === 'd') addTransition(segStart, '__digit', segEnd)
-        else if (escaped === 'w') addTransition(segStart, '__word', segEnd)
-        else if (escaped === 's') addTransition(segStart, '__space', segEnd)
-        else addTransition(segStart, escaped, segEnd)
-        pos++
-      } else if (ch === '^' || ch === '$') {
-        segStart = newState()
-        segEnd = segStart
-        pos++
-      } else {
-        segStart = newState()
-        segEnd = newState()
-        addTransition(segStart, ch, segEnd)
-        pos++
-      }
+      const segStartPos = pos
+      let [segStart, segEnd] = parseSegment()
+      const segEndPos = pos
 
       // Handle quantifiers
       while (pos < pattern.length && ['*', '+', '?', '{'].includes(pattern[pos])) {
         const q = pattern[pos]
         if (q === '{') {
-          while (pos < pattern.length && pattern[pos] !== '}') pos++
-          pos++
+          const { min, max } = parseBraceQuantifier()
+          // 通过重解析片段源码生成重复副本
+          const parseCopy = (): [number, number] => {
+            const saved = pos
+            pos = segStartPos
+            const r = parseSegment()
+            pos = saved
+            return r
+          }
+          // 已构建的片段视为第 1 份拷贝
+          if (min === 0) {
+            if (max === null) {
+              // {0,} 等价于 *
+              const qStart = newState(), qEnd = newState()
+              addEpsilon(qStart, segStart); addEpsilon(qStart, qEnd)
+              addEpsilon(segEnd, qEnd); addEpsilon(segEnd, segStart)
+              segStart = qStart; segEnd = qEnd
+            } else {
+              // 第 1 份拷贝变为可选，再链式追加 max-1 份可选拷贝
+              const qStart = newState(), qEnd = newState()
+              addEpsilon(qStart, segStart); addEpsilon(qStart, qEnd); addEpsilon(segEnd, qEnd)
+              let cEnd = qEnd
+              segStart = qStart
+              for (let i = 1; i < max; i++) {
+                const [s, e] = parseCopy()
+                const qs = newState(), qe = newState()
+                addEpsilon(qs, s); addEpsilon(qs, qe); addEpsilon(e, qe)
+                addEpsilon(cEnd, qs); cEnd = qe
+              }
+              segEnd = cEnd
+            }
+          } else {
+            // 追加 min-1 份必需拷贝
+            let cEnd = segEnd
+            for (let i = 1; i < min; i++) {
+              const [s, e] = parseCopy()
+              addEpsilon(cEnd, s); cEnd = e
+            }
+            if (max === null) {
+              // {n,} 再追加 1 份 Kleene 星号拷贝
+              const [s, e] = parseCopy()
+              const qs = newState(), qe = newState()
+              addEpsilon(qs, s); addEpsilon(qs, qe); addEpsilon(e, qe); addEpsilon(e, s)
+              addEpsilon(cEnd, qs); cEnd = qe
+            } else {
+              // 追加 max-min 份可选拷贝
+              for (let i = min; i < max; i++) {
+                const [s, e] = parseCopy()
+                const qs = newState(), qe = newState()
+                addEpsilon(qs, s); addEpsilon(qs, qe); addEpsilon(e, qe)
+                addEpsilon(cEnd, qs); cEnd = qe
+              }
+            }
+            segEnd = cEnd
+          }
         } else {
           pos++
+          const qStart = newState()
+          const qEnd = newState()
+          addEpsilon(qStart, segStart)
+          if (q === '*') { addEpsilon(qStart, qEnd); addEpsilon(segEnd, qEnd); addEpsilon(segEnd, segStart) }
+          else if (q === '+') { addEpsilon(segEnd, qEnd); addEpsilon(segEnd, segStart) }
+          else if (q === '?') { addEpsilon(qStart, qEnd); addEpsilon(segEnd, qEnd) }
+          segStart = qStart; segEnd = qEnd
         }
-        const qStart = newState()
-        const qEnd = newState()
-        addEpsilon(qStart, segStart)
-        if (q === '*') { addEpsilon(qStart, qEnd); addEpsilon(segEnd, qEnd); addEpsilon(segEnd, segStart) }
-        else if (q === '+') { addEpsilon(segEnd, qEnd); addEpsilon(segEnd, segStart) }
-        else if (q === '?') { addEpsilon(qStart, qEnd); addEpsilon(segEnd, qEnd) }
-        segStart = qStart; segEnd = qEnd
         if (pos < pattern.length && pattern[pos] === '?') pos++ // lazy
       }
 
@@ -400,9 +483,20 @@ export const useRegexStore = defineStore('regex', () => {
   const matchResult = ref<MatchResult | null>(null)
   const ast = ref<ASTNode | null>(null)
   const error = ref('')
-  const selectedTemplate = ref<string>('')
+
+  // 模板列表通过 store 统一暴露，列表页与详情（编辑区）读取同一数据源
+  const templates = TEMPLATES
+  // 最近一次通过“套用”写入编辑区的模板名，用于识别重复套用
+  const lastAppliedTemplate = ref('')
 
   const groupColors = GROUP_COLORS
+
+  // 选中状态由编辑区内容派生：内容与某模板完全一致才高亮，
+  // 手动编辑后自动取消高亮，避免选择状态残留或与输入脱节
+  const selectedTemplate = computed(() => {
+    const t = templates.find(x => x.pattern === pattern.value && x.testString === testString.value)
+    return t ? t.name : ''
+  })
 
   const matchHighlight = computed(() => {
     if (!matchResult.value || !matchResult.value.matched) return null
@@ -443,9 +537,15 @@ export const useRegexStore = defineStore('regex', () => {
   }
 
   function applyTemplate(t: RegexTemplate) {
+    // 重复套用同一模板：保留用户已有的自定义内容，仅刷新匹配结果
+    if (lastAppliedTemplate.value === t.name) {
+      execute()
+      return
+    }
+    lastAppliedTemplate.value = t.name
     pattern.value = t.pattern
     testString.value = t.testString
-    selectedTemplate.value = t.name
+    // execute 失败（解析错误）时保留当前正则不清空，由 error 状态提示
     execute()
   }
 
@@ -481,7 +581,7 @@ export const useRegexStore = defineStore('regex', () => {
 
   return {
     pattern, testString, currentStep, isPlaying, nfa, matchResult, ast, error,
-    selectedTemplate, groupColors, matchHighlight,
+    templates, selectedTemplate, groupColors, matchHighlight,
     execute, setPattern, setTestString, applyTemplate,
     stepForward, stepBackward, resetStep, play, stop
   }

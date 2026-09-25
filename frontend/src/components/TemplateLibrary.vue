@@ -1,7 +1,8 @@
 <template>
   <div class="bg-slate-800 rounded-lg p-4 border border-slate-700">
-    <h3 class="text-sm font-bold text-slate-400 mb-3">模板库 ({{ templates.length }})</h3>
+    <h3 class="text-sm font-bold text-slate-400 mb-3">模板库 ({{ filtered.length }})</h3>
     <input v-model="search" placeholder="搜索模板..." class="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-1.5 text-sm mb-3 focus:outline-none focus:border-cyan-500" />
+    <div v-if="filtered.length === 0" class="text-xs text-slate-500 py-2">无匹配模板，已保留当前正则</div>
     <div class="space-y-1 max-h-64 overflow-y-auto">
       <div v-for="t in filtered" :key="t.name"
         @click="store.applyTemplate(t)"
@@ -19,16 +20,15 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import { useRegexStore, TEMPLATES } from '../store/regex'
-import type { RegexTemplate } from '../types'
+import { useRegexStore } from '../store/regex'
 
 const store = useRegexStore()
-const templates: RegexTemplate[] = TEMPLATES
 const search = ref('')
 
+// 模板数据统一从 store 读取，与详情（编辑区/结果区）保持同一数据源
 const filtered = computed(() => {
-  if (!search.value) return templates
+  if (!search.value) return store.templates
   const q = search.value.toLowerCase()
-  return templates.filter(t => t.name.toLowerCase().includes(q) || t.description.toLowerCase().includes(q) || t.pattern.toLowerCase().includes(q))
+  return store.templates.filter(t => t.name.toLowerCase().includes(q) || t.description.toLowerCase().includes(q) || t.pattern.toLowerCase().includes(q))
 })
 </script>

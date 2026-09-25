@@ -26,25 +26,48 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, watch, onBeforeUnmount } from 'vue'
 import { useRegexStore } from '../store/regex'
 
 const store = useRegexStore()
+// 本地仅作为输入防抖缓冲，真实状态以 store 为唯一数据源
 const localPattern = ref(store.pattern)
 const localTestString = ref(store.testString)
 
-let debounceTimer: ReturnType<typeof setTimeout>
+let patternTimer: ReturnType<typeof setTimeout> | undefined
+let testTimer: ReturnType<typeof setTimeout> | undefined
+
+function cancelPatternTimer() {
+  if (patternTimer) { clearTimeout(patternTimer); patternTimer = undefined }
+}
+function cancelTestTimer() {
+  if (testTimer) { clearTimeout(testTimer); testTimer = undefined }
+}
+
+// store 被外部修改（如套用模板、状态回退）时同步到编辑区，
+// 并取消未执行的防抖，防止旧值随后覆盖新状态造成乱序
+watch(() => store.pattern, (v) => {
+  cancelPatternTimer()
+  localPattern.value = v
+}, { flush: 'sync' })
+watch(() => store.testString, (v) => {
+  cancelTestTimer()
+  localTestString.value = v
+}, { flush: 'sync' })
+
 function onInput() {
-  clearTimeout(debounceTimer)
-  debounceTimer = setTimeout(() => { store.setPattern(localPattern.value) }, 300)
+  cancelPatternTimer()
+  patternTimer = setTimeout(() => { store.setPattern(localPattern.value) }, 300)
 }
 function onTestInput() {
-  clearTimeout(debounceTimer)
-  debounceTimer = setTimeout(() => { store.setTestString(localTestString.value) }, 300)
+  cancelTestTimer()
+  testTimer = setTimeout(() => { store.setTestString(localTestString.value) }, 300)
 }
 function execute() {
+  cancelPatternTimer()
+  cancelTestTimer()
   store.setPattern(localPattern.value)
   store.setTestString(localTestString.value)
-  store.execute()
 }
+onBeforeUnmount(() => { cancelPatternTimer(); cancelTestTimer() })
 </script>
